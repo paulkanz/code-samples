@@ -1,0 +1,9 @@
+---
+- name: Initilize Docker Swarm Cluster
+  hosts: swarm_nodes
+  become: true
+  become_user: nodesync
+  become_method: sudo
+  gather_facts: true
+  roles:
+    - { role: ../roles/docker-swarm-init, tags: [swarm-init] }

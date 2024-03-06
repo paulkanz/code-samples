@@ -1,0 +1,63 @@
+---
+x-deploy: &x-default-deploy
+  replicas: ${ETCD_REPLICAS:-3}
+  placement:
+    max_replicas_per_node: 1
+    constraints:
+      - node.role == manager
+      - node.labels.etcd_node == true
+    preferences:
+      - spread: node.labels.etcd_node
+  restart_policy:
+    condition: on-failure
+    delay: 5s
+    max_attempts: 3
+    window: 120s
+  resources:
+    limits:
+      cpus: "0.50"
+      memory: 128M
+    reservations:
+      cpus: "0.25"
+      memory: 64M
+
+x-logging: &x-default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+networks:
+  etcd-network:
+    name: etcd-network
+    external: true
+
+services:
+  etcd:
+    image: bitnami/etcd:3.5.12
+    hostname: etcd-{{.Task.Slot}}
+    environment:
+      - ALLOW_NONE_AUTHENTICATION=yes
+      - ETCD_ADVERTISE_CLIENT_URLS=http://etcd-{{.Task.Slot}}:2379
+      - ETCD_DATA_DIR=/etcd-data
+      - ETCD_INITIAL_ADVERTISE_PEER_URLS=http://etcd-{{.Task.Slot}}:2380
+      - ETCD_INITIAL_CLUSTER=etcd-1=http://etcd-1:2380,etcd-2=http://etcd-2:2380,etcd-3=http://etcd-3:2380
+      - ETCD_INITIAL_CLUSTER_STATE=new
+      - ETCD_INITIAL_CLUSTER_TOKEN=etcd-cluster
+      - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
+      - ETCD_LISTEN_PEER_URLS=http://0.0.0.0:2380
+      - ETCD_LOGGER=zap
+      - ETCD_LOG_LEVEL=info
+      - ETCD_NAME=etcd-{{.Task.Slot}}
+    ports:
+      - 2379:2379
+    networks:
+      - etcd-network
+    volumes:
+      - etcd:/etcd-data
+    deploy: *x-default-deploy
+    logging: *x-default-logging
+
+volumes:
+  etcd:
+    external: true

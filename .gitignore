@@ -1,0 +1,6 @@
+# Add extensions to be excluded from git
+*.tmp
+*.bak
+*.orig
+*.old
+.DS_Store

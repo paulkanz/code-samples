@@ -1,0 +1,212 @@
+---
+- name: Get Docker Host Info
+  community.general.docker_host_info:
+  register: docker_info
+  when:
+    - inventory_hostname in groups['swarm_nodes']
+
+- name: Read the content of /etc/hostname
+  ansible.builtin.slurp:
+    src: /etc/hostname
+  register: hostname_file_content
+  when:
+    - inventory_hostname in groups['swarm_nodes']
+
+- name: Set a fact with the hostname
+  ansible.builtin.set_fact:
+    hostname: "{{ hostname_file_content.content | b64decode | trim }}"
+
+- name: Check if Node is Part of Swarm
+  ansible.builtin.fail:
+    msg: Node is part of the swarm
+  with_items: "{{ inventory_hostname in groups['swarm_nodes'] }}"
+  when:
+    - "'active' not in docker_info.host_info.Swarm.LocalNodeState"
+
+- name: Restart Docker if Node not in Swarm
+  ansible.builtin.service:
+    name: docker
+    state: restarted
+  when:
+    - inventory_hostname in groups['swarm_nodes']
+    - docker_info.host_info.Swarm.LocalNodeState != 'active'
+
+- name: Init swarm on the first node
+  community.docker.docker_swarm:
+    state: present
+    advertise_addr: "{{ ansible_default_ipv4.address | default(ansible_all_ipv4_addresses[0]) }}"
+    default_addr_pool: "{{ swarm_default_cidr | default('172.217.4.0/24') }}"
+  register: results
+  when:
+    - docker_info.host_info.Swarm.LocalNodeState != 'active'
+    - inventory_hostname in groups['swarm_managers'][0]
+
+- name: Get join-token for manager nodes
+  ansible.builtin.set_fact:
+    join_token_manager: "{{ hostvars[groups['swarm_managers'][0]].results.swarm_facts.JoinTokens.Manager }}"
+  when:
+    - inventory_hostname in groups['swarm_managers']
+    - docker_info.host_info.Swarm.LocalNodeState != 'active'
+
+- name: Join other managers
+  community.docker.docker_swarm:
+    advertise_addr: "{{ ansible_default_ipv4.address | default(ansible_all_ipv4_addresses[0]) }}"
+    remote_addrs: "{{ hostvars[groups['swarm_managers'][0]].ansible_host }}"
+    join_token: "{{ join_token_manager }}"
+    state: join
+  when:
+    - inventory_hostname in groups['swarm_managers']
+    - docker_info.host_info.Swarm.LocalNodeState != 'active'
+
+- name: Get join-token for worker nodes
+  ansible.builtin.set_fact:
+    join_token_worker: "{{ hostvars[groups['swarm_managers'][0]].results.swarm_facts.JoinTokens.Worker }}"
+  when:
+    - inventory_hostname in groups['swarm_workers']
+    - docker_info.host_info.Swarm.LocalNodeState != 'active'
+
+- name: Join other workers
+  community.docker.docker_swarm:
+    advertise_addr: "{{ ansible_default_ipv4.address | default(ansible_all_ipv4_addresses[0]) }}"
+    remote_addrs: "{{ hostvars[groups['swarm_managers'][0]].ansible_host }}"
+    join_token: "{{ join_token_worker }}"
+    state: join
+  when:
+    - inventory_hostname in groups['swarm_workers']
+    - docker_info.host_info.Swarm.LocalNodeState != 'active'
+
+- name: Add missing label
+  community.docker.docker_node:
+    hostname: "{{ item }}"
+    labels:
+      my_label: value
+  register: update_result
+  delegate_to: "{{ item }}"
+  when:
+    - inventory_hostname in groups['swarm_workers']
+    - docker_info.host_info.Swarm.LocalNodeState != 'active'
+
+- name: Print label update output
+  ansible.builtin.debug:
+    msg: "Label update result: {{ update_result.msg }}"
+  when:
+    - inventory_hostname in groups['swarm_workers']
+    - update_result.changed
+    - not ansible_check_mode
+
+- name: Add manager role label
+  community.docker.docker_node:
+    hostname: "{{ hostname }}"
+    labels:
+      node.role: manager
+  delegate_to: "{{ hostvars[groups['swarm_managers'][0]].ansible_host }}"
+  when:
+    - inventory_hostname in groups['swarm_managers']
+
+- name: Add worker role label
+  community.docker.docker_node:
+    hostname: "{{ hostname }}"
+    labels:
+      node.role: worker
+  delegate_to: "{{ hostvars[groups['swarm_managers'][0]].ansible_host }}"
+  when:
+    - inventory_hostname in groups['swarm_workers']
+
+- name: Add nodename label
+  community.docker.docker_node:
+    hostname: "{{ hostname }}"
+    labels:
+      node.labels.nodename: "{{ ansible_host }}"
+  delegate_to: "{{ hostvars[groups['swarm_managers'][0]].ansible_host }}"
+  when:
+    - inventory_hostname in groups['swarm_managers']
+
+- name: Add role label
+  community.docker.docker_node:
+    hostname: "{{ hostname }}"
+    labels:
+      nodename: "{{ ansible_host }}"
+  delegate_to: "{{ hostvars[groups['swarm_managers'][0]].ansible_host }}"
+  when:
+    - inventory_hostname in groups['swarm_managers']
+
+- name: Add nodename label to worker
+  community.docker.docker_node:
+    hostname: "{{ hostname }}"
+    labels:
+      node.labels.nodename: "{{ ansible_host }}"
+  delegate_to: "{{ hostvars[groups['swarm_managers'][0]].ansible_host }}"
+  when:
+    - inventory_hostname in groups['swarm_workers']
+
+- name: Add role label to worker
+  community.docker.docker_node:
+    hostname: "{{ hostname }}"
+    labels:
+      nodename: "{{ ansible_host }}"
+  delegate_to: "{{ hostvars[groups['swarm_managers'][0]].ansible_host }}"
+  when:
+    - inventory_hostname in groups['swarm_workers']
+
+- name: Get info on Docker Swarm
+  community.docker.docker_swarm_info:
+  ignore_errors: true
+  register: swarm_info
+  when:
+    - inventory_hostname in groups['swarm_managers']
+
+- name: Inform about basic flags on Managers
+  ansible.builtin.debug:
+    msg: |
+      Was able to talk to docker daemon: {{ swarm_info.can_talk_to_docker }}
+      Docker in Swarm mode: {{ swarm_info.docker_swarm_active }}
+      This is a Manager node: {{ swarm_info.docker_swarm_manager }}
+  when:
+    - inventory_hostname in groups['swarm_managers']
+
+- name: Get status of private-network
+  community.docker.docker_network_info:
+    name: private-network
+  register: private_network_result
+  run_once: true
+  when:
+    - inventory_hostname in groups['swarm_nodes']
+
+- name: Create Swarm Private Network
+  community.docker.docker_network:
+    name: private-network
+    scope: swarm
+    driver: overlay
+    ipam_config:
+      - subnet: "{{ swarm_private_network_subnet | default('172.162.4.0/24') }}"
+    driver_options:
+      internal: false
+      encrypted: true
+    attachable: true
+  run_once: true
+  when:
+    - inventory_hostname in groups['swarm_managers'][0]
+    - not private_network_result.exists
+
+- name: Get status of public-network
+  community.docker.docker_network_info:
+    name: public-network
+  register: public_network_result
+  run_once: true
+  when:
+    - inventory_hostname in groups['swarm_nodes']
+
+- name: Create Swarm Public Network
+  community.docker.docker_network:
+    name: public-network
+    scope: swarm
+    driver: overlay
+    ipam_config:
+      - subnet: "{{ swarm_public_network_subnet | default('172.162.5.0/24') }}"
+    driver_options:
+      ingress: true
+    attachable: true
+  run_once: true
+  when:
+    - inventory_hostname in groups['swarm_managers'][0]
+    - not public_network_result.exists

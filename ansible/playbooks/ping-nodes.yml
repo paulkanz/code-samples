@@ -1,0 +1,7 @@
+---
+- name: Ping all nodes in Docker Swarm Cluster
+  hosts: swarm_nodes
+  gather_facts: false
+  tasks:
+    - name: Ping all Swarm nodes
+      ansible.builtin.ping:
